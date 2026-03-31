@@ -587,7 +587,7 @@ async function fetchCrypto(){
     if(!res.ok)throw new Error("Network");
     const data=await res.json();
     if(data.bitcoin)exchangeRate=data.bitcoin.krw/data.bitcoin.usd;
-    return coinMap.map(c=>{const d=data[c.apiId];if(!d)return null;return{id:c.id,symbol:c.symbol,name:c.name,color:c.color,apiId:c.apiId,priceKrw:d.krw,priceUsd:d.usd,change24h:d.krw_24h_change,mktCap:d.krw_market_cap}}).filter(Boolean);
+    return coinMap.map(c=>{const d=data[c.apiId];if(!d)return{id:c.id,symbol:c.symbol,name:c.name,color:c.color,apiId:c.apiId,priceKrw:0,priceUsd:0,change24h:0,mktCap:0};return{id:c.id,symbol:c.symbol,name:c.name,color:c.color,apiId:c.apiId,priceKrw:d.krw||0,priceUsd:d.usd||0,change24h:d.krw_24h_change||0,mktCap:d.krw_market_cap||0}});
 }
 
 // ===== LOADING PROGRESS UI =====
