@@ -527,47 +527,57 @@ const fmtPriceSub=(item)=>{
 
 // ===== CORS PROXY (parallel race — fastest wins) =====
 async function fetchProxy(url){
-    const makeProxyUrl=[
-        u=>'https://api.allorigins.win/get?url='+encodeURIComponent(u),
-        u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u),
-        u=>'https://corsproxy.io/?url='+encodeURIComponent(u),
-        u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u),
+    const proxies=[
+        {fn:u=>'https://api.allorigins.win/raw?url='+encodeURIComponent(u), wrap:false},
+        {fn:u=>'https://api.allorigins.win/get?url='+encodeURIComponent(u), wrap:true},
+        {fn:u=>'https://corsproxy.org/?url='+encodeURIComponent(u), wrap:false},
+        {fn:u=>'https://api.codetabs.com/v1/proxy?quest='+encodeURIComponent(u), wrap:false},
+        {fn:u=>'https://thingproxy.freeboard.io/fetch/'+u, wrap:false},
     ];
-    const isWrapped=[true,false,false,false];
-    const TIMEOUT=5000;
+    const TIMEOUT=6000;
 
-    // If we know a fast proxy, try it first with short timeout
+    // If we know a fast proxy, try it first
     if(fetchProxy._lastOk!=null){
         try{
-            const idx=fetchProxy._lastOk;
-            const r=await fetch(makeProxyUrl[idx](url),{signal:AbortSignal.timeout(3000)});
+            const p=proxies[fetchProxy._lastOk];
+            const r=await fetch(p.fn(url),{signal:AbortSignal.timeout(3000)});
             if(r.ok){
-                if(isWrapped[idx]){const j=await r.json();if(j&&j.contents)return JSON.parse(j.contents)}
-                else{const t=await r.text();if(t&&t.length>10)return JSON.parse(t)}
+                const result=await _parseProxyResponse(r,p.wrap);
+                if(result)return result;
             }
         }catch(e){}
     }
 
-    // Race ALL proxies in parallel — first valid response wins
-    const racePromises=makeProxyUrl.map((fn,idx)=>
+    // Race ALL proxies — first valid wins
+    const promises=proxies.map((p,idx)=>
         (async()=>{
-            try{
-                const r=await fetch(fn(url),{signal:AbortSignal.timeout(TIMEOUT)});
-                if(!r.ok)throw new Error('bad');
-                if(isWrapped[idx]){
-                    const j=await r.json();
-                    if(j&&j.contents){const parsed=JSON.parse(j.contents);fetchProxy._lastOk=idx;return parsed}
-                }else{
-                    const t=await r.text();
-                    if(t&&t.length>10){const parsed=JSON.parse(t);fetchProxy._lastOk=idx;return parsed}
-                }
-                throw new Error('empty');
-            }catch(e){throw e}
+            const r=await fetch(p.fn(url),{signal:AbortSignal.timeout(TIMEOUT)});
+            if(!r.ok)throw new Error('status:'+r.status);
+            const result=await _parseProxyResponse(r,p.wrap);
+            if(!result)throw new Error('empty');
+            fetchProxy._lastOk=idx;
+            return result;
         })()
     );
-    try{return await Promise.any(racePromises)}catch(e){return null}
+    try{return await Promise.any(promises)}catch(e){console.warn('All proxies failed for:',url);return null}
 }
 fetchProxy._lastOk=null;
+
+async function _parseProxyResponse(r,isWrapped){
+    try{
+        if(isWrapped){
+            const j=await r.json();
+            if(j&&j.contents){
+                if(typeof j.contents==='string')return JSON.parse(j.contents);
+                return j.contents;
+            }
+        }else{
+            const t=await r.text();
+            if(t&&t.length>10)return JSON.parse(t);
+        }
+    }catch(e){}
+    return null;
+}
 
 // ===== FETCH: CRYPTO =====
 async function fetchCrypto(){
@@ -594,7 +604,7 @@ function updateProgress(current,total,name,mode){
     document.getElementById('loading-title').innerText=mode==='crypto'?'코인 데이터 로딩 중':(mode==='stock_kr'?'KR 주식 로딩 중':'US 주식 로딩 중');
 }
 
-// ===== FETCH ONE STOCK (fallback) =====
+// ===== FETCH ONE STOCK (individual chart API) =====
 async function fetchOneStock(s){
     try{
         const data=await fetchProxy(`https://query1.finance.yahoo.com/v8/finance/chart/${s.symbol}?range=1d&interval=5m`);
@@ -614,25 +624,23 @@ async function fetchOneStock(s){
     return null;
 }
 
-// ===== FETCH: STOCKS (single batch — all at once) =====
+// ===== FETCH: STOCKS =====
 async function fetchStocks(sMap){
     showProgress(true);
-    updateProgress(1,3,'일괄 조회 중...',currentMode);
-
-    // All symbols in ONE request
-    const allSyms=sMap.map(s=>s.symbol).join(',');
     let allQuotes=null;
+    const allSyms=sMap.map(s=>s.symbol).join(',');
 
-    // Try v7 quote API
+    // === Strategy 1: Yahoo batch quote (v7) ===
+    updateProgress(1,4,'Yahoo 일괄 조회...',currentMode);
     try{
         const data=await fetchProxy(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${allSyms}`);
         if(data&&data.quoteResponse&&data.quoteResponse.result&&data.quoteResponse.result.length>0)
             allQuotes=data.quoteResponse.result;
     }catch(e){}
 
-    // Fallback: try v6
+    // === Strategy 2: Yahoo batch quote (v6) ===
     if(!allQuotes){
-        updateProgress(2,3,'v6 API 시도 중...',currentMode);
+        updateProgress(2,4,'Yahoo v6 시도...',currentMode);
         try{
             const data=await fetchProxy(`https://query2.finance.yahoo.com/v6/finance/quote?symbols=${allSyms}`);
             if(data&&data.quoteResponse&&data.quoteResponse.result&&data.quoteResponse.result.length>0)
@@ -640,12 +648,33 @@ async function fetchStocks(sMap){
         }catch(e){}
     }
 
-    updateProgress(3,3,'데이터 처리 중...',currentMode);
+    // === Strategy 3: Yahoo spark (lightweight multi-quote) ===
+    if(!allQuotes){
+        updateProgress(3,4,'Yahoo Spark 시도...',currentMode);
+        try{
+            const data=await fetchProxy(`https://query1.finance.yahoo.com/v8/finance/spark?symbols=${allSyms}&range=1d&interval=5m`);
+            if(data){
+                allQuotes=[];
+                for(const sym of Object.keys(data)){
+                    const item=data[sym];
+                    if(item&&item.meta){
+                        const m=item.meta;
+                        allQuotes.push({symbol:m.symbol||sym, regularMarketPrice:m.regularMarketPrice,
+                            regularMarketChangePercent:m.chartPreviousClose?((m.regularMarketPrice-m.chartPreviousClose)/m.chartPreviousClose)*100:0,
+                            currency:m.currency||'USD', marketCap:0});
+                    }
+                }
+                if(allQuotes.length===0)allQuotes=null;
+            }
+        }catch(e){}
+    }
 
+    // Map batch results
     const results=[];
     let failCount=0;
 
     if(allQuotes&&allQuotes.length>0){
+        updateProgress(4,4,'데이터 처리 중...',currentMode);
         sMap.forEach(s=>{
             const q=allQuotes.find(x=>x.symbol===s.symbol);
             if(q&&q.regularMarketPrice){
@@ -660,9 +689,9 @@ async function fetchStocks(sMap){
         });
     }
 
-    // If batch failed, parallel individual fetch (10 at a time)
+    // === Strategy 4: Individual chart fallback (10 parallel) ===
     if(results.length===0){
-        updateProgress(0,sMap.length,'개별 조회 전환...',currentMode);
+        updateProgress(0,sMap.length,'개별 조회 중...',currentMode);
         const BATCH=10;
         for(let i=0;i<sMap.length;i+=BATCH){
             const batch=sMap.slice(i,i+BATCH);
@@ -673,7 +702,7 @@ async function fetchStocks(sMap){
             });
             if(currentMode==='stock_kr')dataStockKR=[...results];else dataStockUS=[...results];
             updateUI();
-            if(i+BATCH<sMap.length)await new Promise(r=>setTimeout(r,100));
+            if(i+BATCH<sMap.length)await new Promise(r=>setTimeout(r,80));
         }
     }
 
@@ -683,6 +712,7 @@ async function fetchStocks(sMap){
     else showToast(`${results.length}개 로딩 완료`);
     return results;
 }
+
 
 // ===== MAIN FETCH =====
 async function fetchData(){
