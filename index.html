@@ -219,19 +219,21 @@ thead th{position:sticky;top:0;background:rgba(17,24,39,.98);z-index:10}
 
 <!-- Crypto fields -->
 <div id="add-crypto-fields" class="space-y-2.5">
-<div><label class="text-[10px] text-slate-400 block mb-1">CoinGecko API ID <span class="text-slate-600">(예: bitcoin, ethereum, dogecoin)</span></label>
-<input type="text" id="add-crypto-apiId" class="w-full bg-slate-900/80 text-white text-xs rounded-lg p-2.5 border border-white/10 mono focus:border-indigo-500 focus:outline-none" placeholder="coingecko api id"></div>
+<div><label class="text-[10px] text-slate-400 block mb-1">코인 검색 <span class="text-slate-600">(심볼 또는 이름으로 검색)</span></label>
+<div class="flex gap-1.5">
+<input type="text" id="add-crypto-search" class="flex-1 bg-slate-900/80 text-white text-xs rounded-lg p-2.5 border border-white/10 mono focus:border-indigo-500 focus:outline-none" placeholder="예: CRTR, bitcoin, solana..." onkeydown="if(event.key==='Enter')searchCoinGecko()">
+<button onclick="searchCoinGecko()" id="btn-coin-search" class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[10px] font-bold whitespace-nowrap"><i class="fa-solid fa-magnifying-glass mr-1"></i>검색</button>
+</div></div>
+<div id="coin-search-results" class="max-h-40 overflow-y-auto space-y-1 hidden"></div>
+<input type="hidden" id="add-crypto-apiId" value="">
 <div class="grid grid-cols-2 gap-2">
 <div><label class="text-[10px] text-slate-400 block mb-1">심볼</label>
-<input type="text" id="add-crypto-symbol" class="w-full bg-slate-900/80 text-white text-xs rounded-lg p-2.5 border border-white/10 mono focus:border-indigo-500 focus:outline-none" placeholder="BTC"></div>
+<input type="text" id="add-crypto-symbol" class="w-full bg-slate-900/80 text-white text-xs rounded-lg p-2.5 border border-white/10 mono focus:border-indigo-500 focus:outline-none" placeholder="자동입력" readonly></div>
 <div><label class="text-[10px] text-slate-400 block mb-1">이름</label>
-<input type="text" id="add-crypto-name" class="w-full bg-slate-900/80 text-white text-xs rounded-lg p-2.5 border border-white/10 mono focus:border-indigo-500 focus:outline-none" placeholder="Bitcoin"></div>
+<input type="text" id="add-crypto-name" class="w-full bg-slate-900/80 text-white text-xs rounded-lg p-2.5 border border-white/10 mono focus:border-indigo-500 focus:outline-none" placeholder="자동입력" readonly></div>
 </div>
 <div><label class="text-[10px] text-slate-400 block mb-1">색상</label>
 <div class="flex items-center gap-2"><input type="color" id="add-crypto-color" value="#6366f1" class="w-8 h-8 rounded border-0 bg-transparent cursor-pointer"><span class="text-[10px] text-slate-500 mono" id="add-crypto-color-hex">#6366f1</span></div></div>
-<div class="bg-slate-900/50 rounded-lg p-2.5 border border-white/5">
-<p class="text-[10px] text-slate-500"><i class="fa-solid fa-circle-info text-indigo-400 mr-1"></i> CoinGecko API ID는 <a href="https://www.coingecko.com" target="_blank" class="text-indigo-400 hover:underline">coingecko.com</a>에서 코인 페이지 URL의 마지막 부분입니다.<br>예: https://www.coingecko.com/en/coins/<span class="text-white">bitcoin</span></p>
-</div>
 </div>
 
 <!-- Stock KR fields -->
@@ -455,10 +457,13 @@ if(s('ci_customCoinMap'))customCoinMap=JSON.parse(s('ci_customCoinMap'));
 if(s('ci_customStockKR'))customStockKR=JSON.parse(s('ci_customStockKR'));
 if(s('ci_customStockUS'))customStockUS=JSON.parse(s('ci_customStockUS'));
 }catch(e){}
-// Merge custom symbols into maps
-customCoinMap.forEach(item=>{if(!coinMap.find(x=>x.id===item.id))coinMap.push(item)});
+// Merge custom symbols into maps (check id AND symbol to prevent duplicates)
+customCoinMap.forEach(item=>{if(!coinMap.find(x=>x.id===item.id||x.symbol===item.symbol))coinMap.push(item)});
 customStockKR.forEach(item=>{if(!stockMapKR.find(x=>x.id===item.id))stockMapKR.push(item)});
 customStockUS.forEach(item=>{if(!stockMapUS.find(x=>x.id===item.id))stockMapUS.push(item)});
+// Deduplicate maps (keep first occurrence)
+function dedup(arr){const seen=new Set();return arr.filter(c=>{if(seen.has(c.id))return false;seen.add(c.id);return true})}
+coinMap=dedup(coinMap);stockMapKR=dedup(stockMapKR);stockMapUS=dedup(stockMapUS);
 
 let dataCrypto=[],dataStockKR=[],dataStockUS=[];
 let exchangeRate=1450;
@@ -630,17 +635,26 @@ async function fetchStocks(sMap){
     let allQuotes=null;
     const allSyms=sMap.map(s=>s.symbol).join(',');
 
-    // === Strategy 1: Yahoo batch quote (v7) ===
-    updateProgress(1,4,'Yahoo 일괄 조회...',currentMode);
+    // === Strategy 0: Direct Yahoo (no proxy — works from https origins) ===
+    updateProgress(1,5,'직접 조회 중...',currentMode);
     try{
-        const data=await fetchProxy(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${allSyms}`);
-        if(data&&data.quoteResponse&&data.quoteResponse.result&&data.quoteResponse.result.length>0)
-            allQuotes=data.quoteResponse.result;
+        const r=await fetch(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${allSyms}`,{signal:AbortSignal.timeout(5000)});
+        if(r.ok){const data=await r.json();if(data&&data.quoteResponse&&data.quoteResponse.result&&data.quoteResponse.result.length>0)allQuotes=data.quoteResponse.result}
     }catch(e){}
 
-    // === Strategy 2: Yahoo batch quote (v6) ===
+    // === Strategy 1: Yahoo v7 via proxy ===
     if(!allQuotes){
-        updateProgress(2,4,'Yahoo v6 시도...',currentMode);
+        updateProgress(2,5,'프록시 v7...',currentMode);
+        try{
+            const data=await fetchProxy(`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${allSyms}`);
+            if(data&&data.quoteResponse&&data.quoteResponse.result&&data.quoteResponse.result.length>0)
+                allQuotes=data.quoteResponse.result;
+        }catch(e){}
+    }
+
+    // === Strategy 2: Yahoo v6 via proxy ===
+    if(!allQuotes){
+        updateProgress(3,5,'프록시 v6...',currentMode);
         try{
             const data=await fetchProxy(`https://query2.finance.yahoo.com/v6/finance/quote?symbols=${allSyms}`);
             if(data&&data.quoteResponse&&data.quoteResponse.result&&data.quoteResponse.result.length>0)
@@ -648,9 +662,9 @@ async function fetchStocks(sMap){
         }catch(e){}
     }
 
-    // === Strategy 3: Yahoo spark (lightweight multi-quote) ===
+    // === Strategy 3: Yahoo Spark via proxy ===
     if(!allQuotes){
-        updateProgress(3,4,'Yahoo Spark 시도...',currentMode);
+        updateProgress(4,5,'Spark API...',currentMode);
         try{
             const data=await fetchProxy(`https://query1.finance.yahoo.com/v8/finance/spark?symbols=${allSyms}&range=1d&interval=5m`);
             if(data){
@@ -674,7 +688,7 @@ async function fetchStocks(sMap){
     let failCount=0;
 
     if(allQuotes&&allQuotes.length>0){
-        updateProgress(4,4,'데이터 처리 중...',currentMode);
+        updateProgress(5,5,'데이터 처리 중...',currentMode);
         sMap.forEach(s=>{
             const q=allQuotes.find(x=>x.symbol===s.symbol);
             if(q&&q.regularMarketPrice){
@@ -708,11 +722,10 @@ async function fetchStocks(sMap){
 
     showProgress(false);
     if(failCount>0&&results.length>0)showToast(`${results.length}/${sMap.length} 로딩 (${failCount}개 실패)`);
-    else if(results.length===0)showToast('프록시 응답 없음. R키로 재시도');
+    else if(results.length===0)showToast('전체 실패 — 이전 데이터 유지');
     else showToast(`${results.length}개 로딩 완료`);
     return results;
 }
-
 
 // ===== MAIN FETCH =====
 async function fetchData(){
@@ -725,30 +738,53 @@ async function fetchData(){
     dot.className='w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse';
     txt.innerText='Updating...';
 
+    const prevData=getData().slice(); // backup current data
+
     try{
         if(currentMode==='crypto'){
             showProgress(true);
             updateProgress(1,1,'CoinGecko API','crypto');
-            dataCrypto=await fetchCrypto();
+            const newData=await fetchCrypto();
             showProgress(false);
+            // Only update if we got results
+            if(newData&&newData.length>0){
+                dataCrypto=newData;
+            }else if(prevData.length>0){
+                showToast('갱신 실패 — 이전 데이터 유지');
+            }
         }else{
             const map=currentMode==='stock_kr'?stockMapKR:stockMapUS;
             const result=await fetchStocks(map);
-            if(currentMode==='stock_kr')dataStockKR=result;else dataStockUS=result;
+            // Only update if we got MORE results than before (never replace with worse data)
+            if(result&&result.length>0){
+                if(currentMode==='stock_kr')dataStockKR=result;else dataStockUS=result;
+            }else if(prevData.length>0){
+                // Restore previous data — don't lose it
+                setData(prevData);
+                showToast('갱신 실패 — 이전 데이터 유지');
+            }
         }
-        document.getElementById('nav-exchange-rate').innerText=exchangeRate.toLocaleString('ko-KR',{minimumFractionDigits:2,maximumFractionDigits:2});
-        dot.className='w-1.5 h-1.5 rounded-full bg-emerald-500 pulse-dot';
-        txt.innerText='Live';
-        // Save to cache
-        saveDataCache(currentMode,getData());
+        const currentData=getData();
+        if(currentData.length>0){
+            document.getElementById('nav-exchange-rate').innerText=exchangeRate.toLocaleString('ko-KR',{minimumFractionDigits:2,maximumFractionDigits:2});
+            dot.className='w-1.5 h-1.5 rounded-full bg-emerald-500 pulse-dot';
+            txt.innerText='Live';
+            saveDataCache(currentMode,currentData);
+        }else{
+            dot.className='w-1.5 h-1.5 rounded-full bg-amber-500';
+            txt.innerText='캐시';
+        }
         updateUI();
         startCountdown();
     }catch(err){
         console.error(err);
         showProgress(false);
-        if(err.message.includes('Rate Limit'))startRateLimit();
+        // Restore previous data on error
+        if(prevData.length>0)setData(prevData);
+        if(err.message&&err.message.includes('Rate Limit'))startRateLimit();
         else{dot.className='w-1.5 h-1.5 rounded-full bg-red-500';txt.innerText='Offline'}
-        if(!getData().length){setData(getMap().map(c=>({id:c.id,symbol:c.symbol,name:c.name,color:c.color,apiId:c.apiId||c.symbol,priceKrw:0,priceUsd:0,change24h:0,mktCap:0})));updateUI()}
+        updateUI();
+        startCountdown();
     }finally{isFetching=false;icon.classList.remove('animate-spin')}
 }
 
@@ -1002,7 +1038,10 @@ function clearPriceLog(){priceLog=[];prevPrices={};logChanges()}
 function openFavoritesModal(){
     document.getElementById('favoritesModal').classList.remove('hidden');
     const map=getMap(),favs=getFavs();
-    document.getElementById('favorites-list').innerHTML=map.map(c=>`<label class="flex items-center gap-1.5 p-1.5 bg-slate-700/50 rounded-md cursor-pointer hover:bg-slate-700 transition text-[11px]"><input type="checkbox" value="${c.id}" ${favs.includes(c.id)?'checked':''}><span class="text-white mono">${c.symbol}</span><span class="text-slate-500 text-[9px] truncate">${c.name}</span></label>`).join('');
+    // Deduplicate by id
+    const seen=new Set();
+    const unique=map.filter(c=>{if(seen.has(c.id))return false;seen.add(c.id);return true});
+    document.getElementById('favorites-list').innerHTML=unique.map(c=>`<label class="flex items-center gap-1.5 p-1.5 bg-slate-700/50 rounded-md cursor-pointer hover:bg-slate-700 transition text-[11px]"><input type="checkbox" value="${c.id}" ${favs.includes(c.id)?'checked':''}><span class="text-white mono">${c.symbol}</span><span class="text-slate-500 text-[9px] truncate">${c.name}</span></label>`).join('');
 }
 function closeFavoritesModal(){document.getElementById('favoritesModal').classList.add('hidden')}
 function saveFavorites(){
@@ -1067,7 +1106,9 @@ function openAddSymbolModal(){
     const modeNames={'crypto':'암호화폐','stock_kr':'한국 주식','stock_us':'미국 주식'};
     document.getElementById('add-symbol-desc').innerText=`현재 모드: ${modeNames[currentMode]} — 새 종목을 추가합니다`;
     // Clear inputs
-    ['add-crypto-apiId','add-crypto-symbol','add-crypto-name','add-stockkr-code','add-stockkr-name','add-stockus-symbol','add-stockus-name'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=''});
+    ['add-crypto-apiId','add-crypto-symbol','add-crypto-name','add-crypto-search','add-stockkr-code','add-stockkr-name','add-stockus-symbol','add-stockus-name'].forEach(id=>{const el=document.getElementById(id);if(el)el.value=''});
+    // Clear search results
+    const sr=document.getElementById('coin-search-results');if(sr){sr.innerHTML='';sr.classList.add('hidden')}
     // Color picker sync
     ['crypto','stockkr','stockus'].forEach(m=>{
         const cp=document.getElementById('add-'+m+'-color');
@@ -1077,6 +1118,54 @@ function openAddSymbolModal(){
 }
 function closeAddSymbolModal(){document.getElementById('addSymbolModal').classList.add('hidden')}
 
+// ===== CoinGecko Search =====
+async function searchCoinGecko(){
+    const query=document.getElementById('add-crypto-search').value.trim();
+    if(!query){return}
+    const btn=document.getElementById('btn-coin-search');
+    const resultsDiv=document.getElementById('coin-search-results');
+    btn.innerHTML='<i class="fa-solid fa-spinner fa-spin mr-1"></i>검색 중';
+    btn.disabled=true;
+    resultsDiv.classList.remove('hidden');
+    resultsDiv.innerHTML='<p class="text-[10px] text-slate-500 p-2">검색 중...</p>';
+    try{
+        const r=await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(query)}`);
+        if(!r.ok)throw new Error('API error');
+        const data=await r.json();
+        const coins=(data.coins||[]).slice(0,10);
+        if(!coins.length){
+            resultsDiv.innerHTML='<p class="text-[10px] text-slate-500 p-2">검색 결과 없음</p>';
+        }else{
+            resultsDiv.innerHTML=coins.map(c=>{
+                const already=coinMap.find(x=>x.id===c.id);
+                return`<div onclick="selectCoinResult('${c.id}','${(c.symbol||'').toUpperCase()}','${(c.name||'').replace(/'/g,"\\'")}')" class="flex items-center gap-2 p-2 rounded-lg cursor-pointer transition ${already?'bg-slate-800/30 opacity-50':'bg-slate-900/60 hover:bg-indigo-600/30'} border border-white/5">
+                ${c.thumb?`<img src="${c.thumb}" class="w-5 h-5 rounded-full" onerror="this.style.display='none'">`:''}<div class="flex-1 min-w-0">
+                <span class="text-[11px] text-white font-bold mono">${(c.symbol||'').toUpperCase()}</span>
+                <span class="text-[10px] text-slate-400 ml-1.5 truncate">${c.name}</span></div>
+                <span class="text-[9px] text-slate-600 mono shrink-0">${c.id}</span>
+                ${already?'<span class="text-[8px] text-amber-400">등록됨</span>':''}</div>`;
+            }).join('');
+        }
+    }catch(e){
+        resultsDiv.innerHTML='<p class="text-[10px] text-rose-400 p-2">검색 실패: '+e.message+'</p>';
+    }finally{
+        btn.innerHTML='<i class="fa-solid fa-magnifying-glass mr-1"></i>검색';
+        btn.disabled=false;
+    }
+}
+function selectCoinResult(id,symbol,name){
+    document.getElementById('add-crypto-apiId').value=id;
+    document.getElementById('add-crypto-symbol').value=symbol;
+    document.getElementById('add-crypto-name').value=name;
+    // Highlight selected
+    document.querySelectorAll('#coin-search-results > div').forEach(d=>{
+        d.classList.remove('ring-1','ring-indigo-500');
+        if(d.onclick&&d.onclick.toString().includes(id))d.classList.add('ring-1','ring-indigo-500');
+    });
+    document.getElementById('coin-search-results').querySelectorAll('div').forEach(d=>{d.classList.remove('ring-1','ring-indigo-500')});
+    event.currentTarget.classList.add('ring-1','ring-indigo-500');
+}
+
 function addSymbol(){
     const errEl=document.getElementById('add-symbol-error');errEl.classList.add('hidden');
     try{
@@ -1085,8 +1174,8 @@ function addSymbol(){
             const symbol=document.getElementById('add-crypto-symbol').value.trim().toUpperCase();
             const name=document.getElementById('add-crypto-name').value.trim();
             const color=document.getElementById('add-crypto-color').value;
-            if(!apiId||!symbol||!name){errEl.innerText='모든 필드를 입력해주세요';errEl.classList.remove('hidden');return}
-            if(coinMap.find(c=>c.apiId===apiId||c.id===apiId)){errEl.innerText='이미 존재하는 종목입니다';errEl.classList.remove('hidden');return}
+            if(!apiId||!symbol||!name){errEl.innerText='검색 후 코인을 선택해주세요';errEl.classList.remove('hidden');return}
+            if(coinMap.find(c=>c.apiId===apiId||c.id===apiId||c.symbol===symbol)){errEl.innerText='이미 존재하는 종목입니다 (ID 또는 심볼 중복)';errEl.classList.remove('hidden');return}
             const item={id:apiId,symbol,apiId,name,color};
             coinMap.push(item);
             saveCustomSymbol('crypto',item);
